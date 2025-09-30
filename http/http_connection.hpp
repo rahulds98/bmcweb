@@ -76,7 +76,7 @@ class Connection :
 
         connectionCount++;
 
-        BMCWEB_LOG_DEBUG << this << " Connection open, total "
+        BMCWEB_LOG_ERROR << this << " Connection open, total "
                          << connectionCount;
     }
 
@@ -86,7 +86,7 @@ class Connection :
         cancelDeadlineTimer();
 
         connectionCount--;
-        BMCWEB_LOG_DEBUG << this << " Connection closed, total "
+        BMCWEB_LOG_ERROR << this << " Connection closed, total "
                          << connectionCount;
     }
 
@@ -348,11 +348,11 @@ class Connection :
             }
         }
 
-        BMCWEB_LOG_INFO << "Request: "
-                        << " " << this << " HTTP/" << thisReq.version() / 10
-                        << "." << thisReq.version() % 10 << ' '
-                        << thisReq.methodString() << " " << thisReq.target()
-                        << " " << thisReq.ipAddress.to_string();
+        BMCWEB_LOG_ERROR << "Request: "
+                         << " " << this << " HTTP/" << thisReq.version() / 10
+                         << "." << thisReq.version() % 10 << ' '
+                         << thisReq.methodString() << " " << thisReq.target()
+                         << " " << thisReq.ipAddress.to_string();
 
         res.isAliveHelper = [this]() -> bool { return isAlive(); };
 
