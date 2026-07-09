@@ -7,6 +7,7 @@
 
 #include "app.hpp"
 #include "async_resp.hpp"
+#include "concurrent_maintenance_task.hpp"
 #include "dbus_singleton.hpp"
 #include "dbus_utility.hpp"
 #include "error_messages.hpp"
@@ -965,6 +966,7 @@ inline void handleManagerPatch(
     std::optional<std::string> profile;
     std::optional<bool> usbCodeUpdateEnabled;
     std::optional<std::string> serviceIdentification;
+    std::optional<bool> readyToRemove;
 
     if (!json_util::readJsonPatch(                            //
             req, asyncResp->res,                              //
@@ -973,6 +975,7 @@ inline void handleManagerPatch(
             activeSoftwareImageOdataId,                       //
             "LocationIndicatorActive",
             locationIndicatorActive,                          //
+            "Oem/OpenBMC/ReadyToRemove", readyToRemove,       //
             "Oem/OpenBmc/Fan/FanControllers", fanControllers, //
             "Oem/OpenBmc/Fan/FanZones", fanZones,             //
             "Oem/OpenBmc/Fan/PidControllers", pidControllers, //
@@ -1020,6 +1023,18 @@ inline void handleManagerPatch(
     {
         manager_utils::setServiceIdentification(asyncResp,
                                                 serviceIdentification.value());
+    }
+
+    if (readyToRemove)
+    {
+        getManagerObject(
+            asyncResp, managerId,
+            [asyncResp, payload = task::Payload(req),
+             readyToRemove](const std::string& managerPath,
+                            const dbus::utility::MapperServiceMap& /*unused*/) mutable {
+                startCmTask(asyncResp, std::move(payload), managerPath,
+                            *readyToRemove);
+            });
     }
 
     RedfishService::getInstance(app).handleSubRoute(req, asyncResp);

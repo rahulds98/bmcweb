@@ -5,6 +5,7 @@
 #include "app.hpp"
 #include "assembly_battery_cm.hpp"
 #include "async_resp.hpp"
+#include "concurrent_maintenance_task.hpp"
 #include "dbus_singleton.hpp"
 #include "dbus_utility.hpp"
 #include "error_messages.hpp"
@@ -152,6 +153,36 @@ void getAssemblyHealth(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
         });
 }
 
+/**
+ * @brief Populate Oem/OpenBMC/ReadyToRemove for assemblies that implement
+ *        xyz.openbmc_project.State.ReadyToRemove.
+ */
+inline void getAssemblyReadyToRemove(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& serviceName, const std::string& assembly,
+    const nlohmann::json::json_pointer& assemblyJsonPtr)
+{
+    dbus::utility::getProperty<bool>(
+        serviceName, assembly, std::string(readyToRemoveIface), "ReadyToRemove",
+        [asyncResp, assemblyJsonPtr](const boost::system::error_code& ec,
+                                     bool value) {
+            if (ec)
+            {
+                if (ec.value() != EBADR)
+                {
+                    BMCWEB_LOG_ERROR("DBUS response error: {}", ec.value());
+                    messages::internalError(asyncResp->res);
+                }
+                return;
+            }
+            asyncResp->res.jsonValue[assemblyJsonPtr]["Oem"]["OpenBMC"]
+                                    ["@odata.type"] =
+                "#OpenBMCAssembly.v1_0_0.OpenBMC";
+            asyncResp->res.jsonValue[assemblyJsonPtr]["Oem"]["OpenBMC"]
+                                    ["ReadyToRemove"] = value;
+        });
+}
+
 inline void afterGetDbusObject(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& assembly,
@@ -196,6 +227,11 @@ inline void afterGetDbusObject(
             {
                 getAssemblyHealth(asyncResp, serviceName, assembly,
                                   assemblyJsonPtr);
+            }
+            else if (interface == readyToRemoveIface)
+            {
+                getAssemblyReadyToRemove(asyncResp, serviceName, assembly,
+                                         assemblyJsonPtr);
             }
         }
     }
@@ -347,6 +383,7 @@ inline void afterHandleChassisAssemblyPatch(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& chassisID,
     std::vector<nlohmann::json::object_t>& assemblyData,
+    task::Payload payload,
     const boost::system::error_code& ec,
     const std::vector<std::string>& assemblyList)
 {
@@ -485,11 +522,9 @@ inline void afterHandleChassisAssemblyPatch(
             }
             else
             {
-                BMCWEB_LOG_WARNING(
-                    "Property Unknown: ReadyToRemove on Assembly with MemberID: {}",
-                    assemblyIndex);
-                messages::propertyUnknown(asyncResp->res, "ReadyToRemove");
-                return;
+                // CM-backed assembly: start async task tracking the CM daemon
+                startCmTask(asyncResp, task::Payload(payload), assembly,
+                            readytoremove.value());
             }
         }
         assemblyIndex++;
@@ -515,8 +550,14 @@ inline void handleChassisAssemblyPatch(
 
     assembly_utils::getChassisAssembly(
         asyncResp, chassisID,
-        std::bind_front(afterHandleChassisAssemblyPatch, asyncResp, chassisID,
-                        assemblyData));
+        [asyncResp, chassisID, assemblyData = std::move(assemblyData),
+         payload = task::Payload(req)](
+            const boost::system::error_code& ec,
+            const std::vector<std::string>& assemblyList) mutable {
+            afterHandleChassisAssemblyPatch(asyncResp, chassisID, assemblyData,
+                                            std::move(payload), ec,
+                                            assemblyList);
+        });
 }
 
 /**

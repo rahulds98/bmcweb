@@ -7,6 +7,7 @@
 
 #include "app.hpp"
 #include "async_resp.hpp"
+#include "concurrent_maintenance_task.hpp"
 #include "dbus_singleton.hpp"
 #include "dbus_utility.hpp"
 #include "error_messages.hpp"
@@ -667,22 +668,24 @@ inline void handleChassisPatch(
     }
     std::optional<bool> locationIndicatorActive;
     std::optional<std::string> indicatorLed;
+    std::optional<bool> readyToRemove;
 
     if (param.empty())
     {
         return;
     }
 
-    if (!json_util::readJsonPatch(                             //
-            req, asyncResp->res,                               //
-            "IndicatorLED", indicatorLed,                      //
-            "LocationIndicatorActive", locationIndicatorActive //
+    if (!json_util::readJsonPatch(                                    //
+            req, asyncResp->res,                                      //
+            "IndicatorLED", indicatorLed,                             //
+            "LocationIndicatorActive", locationIndicatorActive,       //
+            "Oem/OpenBMC/ReadyToRemove", readyToRemove                //
             ))
     {
         return;
     }
 
-    if (!locationIndicatorActive && !indicatorLed)
+    if (!locationIndicatorActive && !indicatorLed && !readyToRemove)
     {
         return; // delete this when we support more patch properties
     }
@@ -705,9 +708,11 @@ inline void handleChassisPatch(
 
     dbus::utility::getSubTree(
         "/xyz/openbmc_project/inventory", 0, chassisInterfaces,
-        [asyncResp, chassisId, locationIndicatorActive,
-         indicatorLed](const boost::system::error_code& ec,
-                       const dbus::utility::MapperGetSubTreeResponse& subtree) {
+        [asyncResp, chassisId, locationIndicatorActive, indicatorLed,
+         readyToRemove,
+         payload = task::Payload(req)](
+            const boost::system::error_code& ec,
+            const dbus::utility::MapperGetSubTreeResponse& subtree) mutable {
             if (ec)
             {
                 BMCWEB_LOG_ERROR("DBUS response error {}", ec);
@@ -782,6 +787,11 @@ inline void handleChassisPatch(
                                                       "IndicatorLED");
                         }
                     }
+                }
+                if (readyToRemove)
+                {
+                    startCmTask(asyncResp, std::move(payload), path,
+                                *readyToRemove);
                 }
                 return;
             }
