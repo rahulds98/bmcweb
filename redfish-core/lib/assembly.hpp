@@ -152,6 +152,79 @@ void getAssemblyHealth(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
         });
 }
 
+/**
+ * @brief Populate ReadyToRemove for assemblies that implement
+ *        xyz.openbmc_project.State.ReadyToRemove.
+ */
+inline void afterGetAssemblyReadyToRemove(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const nlohmann::json::json_pointer& assemblyJsonPtr,
+    const boost::system::error_code& ec, bool value)
+{
+    if (ec)
+    {
+        if (ec.value() != EBADR)
+        {
+            BMCWEB_LOG_ERROR("DBUS response error: {}", ec.value());
+            messages::internalError(asyncResp->res);
+        }
+        return;
+    }
+    asyncResp->res.jsonValue[assemblyJsonPtr]["ReadyToRemove"] = value;
+}
+
+inline void getAssemblyReadyToRemove(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& serviceName, const std::string& assembly,
+    const nlohmann::json::json_pointer& assemblyJsonPtr)
+{
+    dbus::utility::getProperty<bool>(
+        serviceName, assembly, "xyz.openbmc_project.State.ReadyToRemove",
+        "ReadyToRemove",
+        std::bind_front(afterGetAssemblyReadyToRemove, asyncResp,
+                        assemblyJsonPtr));
+}
+
+inline void afterSetAssemblyReadyToRemove(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& assembly, bool value,
+    const boost::system::error_code& ec,
+    const dbus::utility::MapperGetObject& object)
+{
+    if (ec)
+    {
+        if (ec.value() == EBADR)
+        {
+            messages::propertyUnknown(asyncResp->res, "ReadyToRemove");
+            return;
+        }
+        BMCWEB_LOG_ERROR("getDbusObject failed for ReadyToRemove on {}: {}",
+                         assembly, ec.message());
+        messages::internalError(asyncResp->res);
+        return;
+    }
+    if (object.empty())
+    {
+        messages::propertyUnknown(asyncResp->res, "ReadyToRemove");
+        return;
+    }
+    const std::string& service = object.begin()->first;
+    setDbusProperty(asyncResp, "ReadyToRemove", service, assembly,
+                    "xyz.openbmc_project.State.ReadyToRemove", "ReadyToRemove",
+                    value);
+}
+
+inline void setAssemblyReadyToRemove(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& assembly, bool value)
+{
+    constexpr std::array<std::string_view, 1> readyToRemoveIface = {
+        "xyz.openbmc_project.State.ReadyToRemove"};
+    dbus::utility::getDbusObject(assembly, readyToRemoveIface,
+                                 std::bind_front(afterSetAssemblyReadyToRemove,
+                                                 asyncResp, assembly, value));
+}
+
 inline void afterGetDbusObject(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& assembly,
@@ -197,6 +270,11 @@ inline void afterGetDbusObject(
                 getAssemblyHealth(asyncResp, serviceName, assembly,
                                   assemblyJsonPtr);
             }
+            else if (interface == "xyz.openbmc_project.State.ReadyToRemove")
+            {
+                getAssemblyReadyToRemove(asyncResp, serviceName, assembly,
+                                         assemblyJsonPtr);
+            }
         }
     }
 }
@@ -219,7 +297,7 @@ inline void getAssemblyProperties(
     for (const std::string& assembly : assemblies)
     {
         nlohmann::json::object_t item;
-        item["@odata.type"] = "#Assembly.v1_5_1.AssemblyData";
+        item["@odata.type"] = "#Assembly.v1_6_0.AssemblyData";
         item["@odata.id"] = boost::urls::format(
             "/redfish/v1/Chassis/{}/Assembly#/Assemblies/{}", chassisId,
             std::to_string(assemblyIndex));
@@ -358,16 +436,19 @@ inline void afterHandleChassisAssemblyPatch(
     }
 
     std::map<std::string, bool> locationIndicatorActiveMap;
+    std::map<std::string, bool> readyToRemoveMap;
     std::map<std::string, nlohmann::json> oemIndicatorMap;
 
     for (nlohmann::json::object_t& item : assemblyData)
     {
         std::optional<std::string> memberId;
         std::optional<bool> locationIndicatorActive;
+        std::optional<bool> readyToRemove;
         std::optional<nlohmann::json> oem;
-        if (!json_util::readJsonObject(item, asyncResp->res, "MemberId",
-                                       memberId, "LocationIndicatorActive",
-                                       locationIndicatorActive, "Oem", oem))
+        if (!json_util::readJsonObject(
+                item, asyncResp->res, "MemberId", memberId,
+                "LocationIndicatorActive", locationIndicatorActive,
+                "ReadyToRemove", readyToRemove, "Oem", oem))
         {
             return;
         }
@@ -382,6 +463,20 @@ inline void afterHandleChassisAssemblyPatch(
             {
                 BMCWEB_LOG_WARNING(
                     "Property Missing - MemberId must be included with LocationIndicatorActive ");
+                messages::propertyMissing(asyncResp->res, "MemberId");
+                return;
+            }
+        }
+        if (readyToRemove)
+        {
+            if (memberId)
+            {
+                readyToRemoveMap[*memberId] = *readyToRemove;
+            }
+            else
+            {
+                BMCWEB_LOG_WARNING(
+                    "Property Missing - MemberId must be included with ReadyToRemove");
                 messages::propertyMissing(asyncResp->res, "MemberId");
                 return;
             }
@@ -413,6 +508,7 @@ inline void afterHandleChassisAssemblyPatch(
             setLocationIndicatorActive(asyncResp, assembly, iter->second);
         }
 
+        // Handle Oem/OpenBMC/ReadyToRemove
         auto iter2 = oemIndicatorMap.find(std::to_string(assemblyIndex));
 
         if (iter2 != oemIndicatorMap.end())
@@ -492,6 +588,14 @@ inline void afterHandleChassisAssemblyPatch(
                 return;
             }
         }
+
+        auto iter3 = readyToRemoveMap.find(std::to_string(assemblyIndex));
+
+        if (iter3 != readyToRemoveMap.end())
+        {
+            setAssemblyReadyToRemove(asyncResp, assembly, iter3->second);
+        }
+
         assemblyIndex++;
     }
 }
@@ -515,8 +619,12 @@ inline void handleChassisAssemblyPatch(
 
     assembly_utils::getChassisAssembly(
         asyncResp, chassisID,
-        std::bind_front(afterHandleChassisAssemblyPatch, asyncResp, chassisID,
-                        assemblyData));
+        [asyncResp, chassisID, assemblyData = std::move(assemblyData)](
+            const boost::system::error_code& ec,
+            const std::vector<std::string>& assemblyList) mutable {
+            afterHandleChassisAssemblyPatch(asyncResp, chassisID, assemblyData,
+                                            ec, assemblyList);
+        });
 }
 
 /**
